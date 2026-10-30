@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    name: test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Fyne needs GL/X11/audio headers to build; 7zip is for the tests below.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libgl1-mesa-dev \
+            xorg-dev \
+            libasound2-dev \
+            7zip
+      # task/integration_test.go calls exec.LookPath("7z") and skips the entire
+      # package when it is absent - a green job without 7zip means zero
+      # integration coverage, so the binary has to be installed.
+
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "gofmt needed:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -count=1
+
+  build-windows:
+    name: build (Windows GUI)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # README line 487: -H windowsgui hides the console window on Windows.
+      - name: Build
+        shell: pwsh
+        run: go build -ldflags '-H windowsgui' -o peakzip.exe .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peakzip-windows-amd64
+          path: peakzip.exe
+          if-no-files-found: error
