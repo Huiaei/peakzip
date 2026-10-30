@@ -1,0 +1,30 @@
+# ---- 编译产物（README 里的 `go build -o peakzip .` 输出到仓库根目录）----
+/peakzip
+/peakzip.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ---- 运行 / 调试日志（main.go: -debug 会把 peakzip_debug.log 写到当前目录）----
+peakzip_debug.log
+*.log
+
+# ---- 测试与覆盖率 ----
+*.test
+*.out
+coverage.out
+coverage.html
+
+# ---- Go 工作区文件 ----
+go.work
+go.work.sum
+
+# ---- 编辑器 / 操作系统 ----
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
