@@ -1,4 +1,6 @@
 # PeakZip — 低峰值分卷压缩 / 解压管理工具
+> **注：本项目由 AI 实现（AI-generated），CI 已禁用。**
+
 
 ![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)
 ![GUI](https://img.shields.io/badge/GUI-Fyne_v2-blueviolet)
