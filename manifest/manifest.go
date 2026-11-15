@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"peakzip/scanner"
 )
@@ -51,6 +52,28 @@ type VolumeEntry struct {
 	Hash          string   `json:"hash,omitempty"`
 	Type          string   `json:"type"` // "manifest" or "data"
 	Contains      []string `json:"contains,omitempty"`
+}
+
+// SplitSuffix extracts the ".NNN" part suffix from a volume filename,
+// returning the three-digit string without the dot, or "" if the filename
+// has no valid part suffix (e.g. a regular volume or the manifest volume).
+// The suffix is only treated as a part suffix when it is exactly three
+// decimal digits, matching the 7z split convention ".001", ".002", ...
+func (v *VolumeEntry) SplitSuffix() string {
+	idx := strings.LastIndex(v.Filename, ".")
+	if idx <= 0 {
+		return ""
+	}
+	part := v.Filename[idx+1:]
+	if len(part) != 3 {
+		return ""
+	}
+	for i := 0; i < len(part); i++ {
+		if part[i] < '0' || part[i] > '9' {
+			return ""
+		}
+	}
+	return part
 }
 
 // Manifest is the top-level document describing the project.

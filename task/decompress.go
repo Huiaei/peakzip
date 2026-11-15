@@ -92,6 +92,13 @@ func RunDecompress(ctx context.Context, cfg DecompressTask, progress chan<- Prog
 	}
 	log.Info(fmt.Sprintf("清单已加载：项目=%s，数据卷=%d，文件=%d", m.ProjectName, m.DataVolumeCount(), len(m.Files)))
 
+	// Step 1b: Pre-flight disk space check.
+	// Fail fast before modifying anything if the target filesystem cannot
+	// hold the worst-case peak (all volumes + largest single-volume output).
+	if err := checkSpaceBeforeExtract(cfg, m); err != nil {
+		return err
+	}
+
 	// Step 2: Initialize state
 	statePath := state.StateFilePath(cfg.ExtractDir)
 	taskID := hasher.BytesHash([]byte(m.ProjectName + fmt.Sprintf("%d", m.TotalVolumes)))
@@ -373,6 +380,16 @@ func scanAndScheduleVolumes(ctx context.Context, m *manifest.Manifest, cfg Decom
 				continue
 			}
 
+			// Pre-flight hash verification of every fragment before
+			// scheduling. This avoids discovering a corrupted fragment
+			// halfway through a 7z extraction (which would waste the whole
+			// volume). A corrupt fragment leaves the file unscheduled so the
+			// downloader can replace it and the scanner retries.
+			if err := verifyAllFragments(m, f, cfg.DownloadDir); err != nil {
+				log.Error(fmt.Sprintf("跨卷文件 %s 分片校验失败：%v", f.Path, err))
+				continue
+			}
+
 			basePath, found := crossVolumeBasePath(m, f, cfg.DownloadDir)
 			if !found {
 				log.Error(fmt.Sprintf("无法定位跨卷文件 %s 的分片", f.Path))
@@ -442,20 +459,34 @@ func crossVolumeBasePath(m *manifest.Manifest, f *manifest.FileEntry, downloadDi
 	if ve == nil || ve.Filename == "" {
 		return "", false
 	}
-	idx := strings.LastIndex(ve.Filename, ".")
-	if idx <= 0 {
+	suffix := ve.SplitSuffix()
+	if suffix == "" {
 		return "", false
 	}
-	part := ve.Filename[idx+1:]
-	if len(part) != 3 {
-		return "", false
-	}
-	for i := 0; i < len(part); i++ {
-		if part[i] < '0' || part[i] > '9' {
-			return "", false
+	return filepath.Join(downloadDir, strings.TrimSuffix(ve.Filename, "."+suffix)), true
+}
+
+// verifyAllFragments computes the hash of every fragment belonging to a
+// cross-volume file and checks it against the manifest. It returns an error
+// describing the first mismatch. This is a pre-flight check run before the
+// cross-volume archive is handed to 7z, so a corrupt fragment is caught
+// before extraction begins rather than halfway through.
+func verifyAllFragments(m *manifest.Manifest, f *manifest.FileEntry, downloadDir string) error {
+	for n := f.VolumeStart; n <= f.VolumeEnd; n++ {
+		ve := m.FindVolumeByNumber(n)
+		if ve == nil || ve.Hash == "" {
+			continue
+		}
+		path := filepath.Join(downloadDir, ve.Filename)
+		actual, err := hasher.FileHash(path)
+		if err != nil {
+			return fmt.Errorf("分片 %d 哈希失败：%w", n, err)
+		}
+		if actual != ve.Hash {
+			return fmt.Errorf("分片 %d 哈希不匹配：期望 %s，实际 %s", n, ve.Hash, actual)
 		}
 	}
-	return filepath.Join(downloadDir, ve.Filename[:idx]), true
+	return nil
 }
 
 // extractJob represents a single extraction task.
@@ -607,6 +638,17 @@ func processExtractJob(ctx context.Context, workerID int, arch *archiver.Archive
 		}
 		relPath = filepath.ToSlash(relPath)
 
+		// Resume: skip files already extracted and verified in a previous
+		// run. This is the file-granularity commit point (design borrowed
+		// from hatchzip's "log before truncate" semantics): the state file
+		// is written atomically AFTER each file lands in its final location,
+		// so a crash never claims an un-flushed file.
+		if ts.IsFileDone(relPath) {
+			log.Debug(fmt.Sprintf("文件 %s 已完成（文件级提交点），跳过", relPath))
+			moved++
+			continue
+		}
+
 		// Find the file entry in the manifest.
 		var expectedHash string
 		for fi := range m.Files {
@@ -652,6 +694,16 @@ func processExtractJob(ctx context.Context, workerID int, arch *archiver.Archive
 		ts.MarkFileDone(relPath)
 		moved++
 		log.Info(fmt.Sprintf("文件 %s 已解压并校验通过", relPath))
+
+		// Persist the file-granularity commit point immediately after the
+		// file is safely in its final location. The state file is written
+		// atomically (temp + rename), so the journal never claims a file
+		// that has not actually landed on disk. This is the "log before
+		// truncate" guarantee: a crash after this write can resume by
+		// skipping all files recorded in FilesDone.
+		if err := state.SaveState(ts, state.StateFilePath(cfg.ExtractDir)); err != nil {
+			log.Warn(fmt.Sprintf("保存文件级提交点失败：%v", err))
+		}
 	}
 
 	if moved == 0 && len(filesToMove) > 0 {
